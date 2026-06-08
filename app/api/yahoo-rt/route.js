@@ -19,45 +19,18 @@ export async function GET(request) {
     }
 
     const data = await res.json();
-    const allKeys = Object.keys(data || {});
 
-    // timeline配列を取得
-    const timeline = data?.timeline || [];
-    const tweets = [];
+    // 正しい構造: data.timeline.entry[].displayText
+    const entries = data?.timeline?.entry || [];
+    const tweets = entries
+      .slice(0, 20)
+      .map(e => e?.displayText || "")
+      .filter(t => t.length > 5);
 
-    if (Array.isArray(timeline) && timeline.length > 0) {
-      // 最初の要素の構造をデバッグ用に返す
-      const firstItem = timeline[0];
-      const firstItemKeys = typeof firstItem === "object" ? Object.keys(firstItem) : [];
-
-      for (const t of timeline.slice(0, 20)) {
-        // 様々なテキストフィールドを試す
-        const text =
-          t?.text ||
-          t?.body ||
-          t?.tweet?.text ||
-          t?.tweet?.body ||
-          t?.message ||
-          t?.content ||
-          (typeof t === "string" ? t : "");
-        if (text && text.length > 5) tweets.push(text);
-      }
-
-      return Response.json({
-        tweets,
-        count: tweets.length,
-        timeline_length: timeline.length,
-        first_item_keys: firstItemKeys,
-        first_item_sample: JSON.stringify(timeline[0]).slice(0, 300),
-      });
-    }
-
-    // timelineが空 or 構造が違う場合
     return Response.json({
-      tweets: [],
-      raw_keys: allKeys,
-      timeline_length: timeline.length,
-      raw_sample: JSON.stringify(data).slice(0, 500),
+      tweets,
+      count: tweets.length,
+      total_available: data?.timeline?.head?.totalResultsAvailable || 0,
     });
 
   } catch (e) {
