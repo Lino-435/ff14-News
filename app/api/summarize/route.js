@@ -7,37 +7,22 @@ function todayKey() {
 }
 
 async function saveToGitHub(items, token) {
-  if (!token) return;
+  if (!token || items.length === 0) return;
   const date = todayKey();
   const path = `data/${date}.json`;
   const content = Buffer.from(JSON.stringify(items, null, 2)).toString("base64");
-
-  // 既存ファイルのSHAを取得（更新の場合に必要）
   let sha;
   try {
     const r = await fetch(`https://api.github.com/repos/${OWNER}/${REPO}/contents/${path}`, {
       headers: { Authorization: `token ${token}`, Accept: "application/vnd.github+json" },
     });
-    if (r.ok) {
-      const d = await r.json();
-      sha = d.sha;
-    }
+    if (r.ok) sha = (await r.json()).sha;
   } catch {}
-
-  const body = {
-    message: `data: update ${date}`,
-    content,
-    branch: "main",
-  };
+  const body = { message: `data: update ${date}`, content, branch: "main" };
   if (sha) body.sha = sha;
-
   await fetch(`https://api.github.com/repos/${OWNER}/${REPO}/contents/${path}`, {
     method: "PUT",
-    headers: {
-      Authorization: `token ${token}`,
-      Accept: "application/vnd.github+json",
-      "Content-Type": "application/json",
-    },
+    headers: { Authorization: `token ${token}`, Accept: "application/vnd.github+json", "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
 }
@@ -50,19 +35,32 @@ export async function POST(request) {
 
     if (!apiKey) return Response.json({ error: "ANTHROPIC_API_KEY not set" }, { status: 500 });
 
+    // 入力サイズを制限（タイムアウト防止）
+    const limitedTweets = (tweets || []).slice(0, 15);
+    const limitedItems = (lodestone_items || []).slice(0, 8);
+
     let inputText = "";
-    if (lodestone_items?.length > 0) {
+    if (limitedItems.length > 0) {
       inputText += "【FF14公式 Lodestone】\n";
-      lodestone_items.forEach((item, i) => {
+      limitedItems.forEach((item, i) => {
         inputText += `${i+1}. ${item.title}\n   ${item.description}\n\n`;
       });
     }
-    if (tweets?.length > 0) {
+    if (limitedTweets.length > 0) {
       inputText += "\n【X（Twitter）上のFF14関連投稿】\n";
-      tweets.forEach((t, i) => { inputText += `${i+1}. ${t}\n---\n`; });
+      // \tSTART\t〜\tEND\t マーカーを除去してクリーンアップ
+      limitedTweets.forEach((t, i) => {
+        const clean = t.replace(/\tSTART\t[^\t]*\tEND\t/g, "").replace(/\t/g, " ").trim();
+        if (clean.length > 5) inputText += `${i+1}. ${clean}\n---\n`;
+      });
     }
 
-    if (!inputText.trim()) return Response.json({ summaries: [] });
+    console.log(`[summarize] input length: ${inputText.length} chars, tweets: ${limitedTweets.length}, items: ${limitedItems.length}`);
+
+    if (!inputText.trim()) {
+      console.log("[summarize] inputText is empty, returning []");
+      return Response.json({ summaries: [] });
+    }
 
     const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
@@ -93,21 +91,28 @@ JSONのみ返してください。\n\n---\n${inputText}`,
 
     if (!res.ok) {
       const err = await res.text();
+      console.log(`[summarize] Anthropic error ${res.status}: ${err.slice(0, 200)}`);
       return Response.json({ error: `Anthropic API error: ${res.status}`, detail: err }, { status: 500 });
     }
 
     const aiData = await res.json();
     const raw = aiData.content?.[0]?.text || "[]";
+    console.log(`[summarize] AI raw response (first 200): ${raw.slice(0, 200)}`);
+
     const cleaned = raw.replace(/```json|```/g, "").trim();
-
     let summaries;
-    try { summaries = JSON.parse(cleaned); } catch { summaries = []; }
+    try {
+      summaries = JSON.parse(cleaned);
+    } catch (e) {
+      console.log(`[summarize] JSON parse error: ${e.message}, raw: ${cleaned.slice(0, 300)}`);
+      summaries = [];
+    }
 
-    // GitHubに自動保存（失敗しても結果は返す）
+    console.log(`[summarize] summaries count: ${summaries.length}`);
     saveToGitHub(summaries, githubToken).catch(() => {});
-
     return Response.json({ summaries });
   } catch (e) {
+    console.log(`[summarize] exception: ${e.message}`);
     return Response.json({ error: e.message }, { status: 500 });
   }
 }
