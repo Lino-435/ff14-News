@@ -1,66 +1,54 @@
 export async function GET() {
-  const URLS = [
-    "https://jp.finalfantasyxiv.com/lodestone/news/news.xml",
-    "https://na.finalfantasyxiv.com/lodestone/news/news.xml",
-  ];
-
-  for (const url of URLS) {
-    try {
-      const res = await fetch(url, {
-        headers: { "User-Agent": "Mozilla/5.0 (compatible; FF14NewsBot/1.0)" },
-      });
-
-      if (!res.ok) continue;
-      const xml = await res.text();
-
-      // デバッグ：最初の500文字を返す
-      if (!xml.includes("<item>") && !xml.includes("<entry>")) {
-        return Response.json({
-          items: [],
-          debug: `No items found. First 300 chars: ${xml.slice(0, 300)}`,
-          url,
-        });
-      }
-
-      const items = [];
-      // <item> タグ形式（RSS）
-      const itemRegex = /<item[^>]*>([\s\S]*?)<\/item>/g;
-      let match;
-      while ((match = itemRegex.exec(xml)) !== null && items.length < 10) {
-        const block = match[1];
-        const title =
-          block.match(/<title><!\[CDATA\[([\s\S]*?)\]\]><\/title>/)?.[1] ||
-          block.match(/<title>([\s\S]*?)<\/title>/)?.[1] || "";
-        const desc =
-          block.match(/<description><!\[CDATA\[([\s\S]*?)\]\]><\/description>/)?.[1] ||
-          block.match(/<description>([\s\S]*?)<\/description>/)?.[1] || "";
-        const pubDate = block.match(/<pubDate>([\s\S]*?)<\/pubDate>/)?.[1] || "";
-        items.push({
-          title: title.trim(),
-          description: desc.replace(/<[^>]+>/g, "").trim().slice(0, 200),
-          pubDate,
-        });
-      }
-
-      if (items.length > 0) return Response.json({ items, url });
-    } catch (e) {
-      continue;
-    }
-  }
-
-  // フォールバック：LodestoneのHTMLページをスクレイプ
   try {
+    // LodestoneのNewsページをスクレイプ
     const res = await fetch("https://jp.finalfantasyxiv.com/lodestone/news/", {
-      headers: { "User-Agent": "Mozilla/5.0 (compatible; FF14NewsBot/1.0)" },
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept-Language": "ja,en;q=0.9",
+      },
     });
+
     const html = await res.text();
+
     const items = [];
-    const titleRegex = /class="[^"]*news__heading[^"]*"[^>]*>\s*<[^>]+>([^<]+)<\/[^>]+>/g;
+
+    // ニュースリンクとタイトルを抽出
+    // Lodestone HTMLパターン: <a href="/lodestone/news/..." class="...">タイトル</a>
+    const linkRegex = /href="(\/lodestone\/(?:news|topics|updates|maintenance|status)\/[^"]+)"[^>]*>\s*([^<]{5,100})\s*</g;
     let m;
-    while ((m = titleRegex.exec(html)) !== null && items.length < 10) {
-      items.push({ title: m[1].trim(), description: "", pubDate: "" });
+    const seen = new Set();
+    while ((m = linkRegex.exec(html)) !== null && items.length < 15) {
+      const path = m[1];
+      const title = m[2].trim();
+      if (!seen.has(path) && !title.includes("javascript") && title.length > 4) {
+        seen.add(path);
+        items.push({
+          title,
+          description: "",
+          pubDate: "",
+          link: `https://jp.finalfantasyxiv.com${path}`,
+        });
+      }
     }
-    return Response.json({ items, source: "html_scrape", debug: items.length === 0 ? html.slice(0, 500) : undefined });
+
+    // 見出しテキストも試みる
+    if (items.length === 0) {
+      const h2Regex = /<(?:h[123456]|p)[^>]*class="[^"]*(?:news|heading|title)[^"]*"[^>]*>\s*(?:<[^>]+>)*([^<]{5,100})(?:<\/[^>]+>)*\s*<\/(?:h[123456]|p)>/g;
+      while ((m = h2Regex.exec(html)) !== null && items.length < 15) {
+        const title = m[1].trim();
+        if (title.length > 4) items.push({ title, description: "", pubDate: "" });
+      }
+    }
+
+    // デバッグ：news関連の部分を抽出
+    const newsIdx = html.indexOf("news");
+    const debugSnippet = newsIdx > -1 ? html.slice(Math.max(0, newsIdx - 50), newsIdx + 500) : html.slice(2000, 2500);
+
+    return Response.json({
+      items,
+      count: items.length,
+      debug: items.length === 0 ? debugSnippet : undefined,
+    });
   } catch (e) {
     return Response.json({ items: [], error: e.message });
   }
