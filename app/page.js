@@ -1,5 +1,5 @@
 "use client";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 
 const CATEGORIES = [
   { id: "all", label: "すべて", icon: "⚔️" },
@@ -116,7 +116,13 @@ function DetailModal({ item, onClose }) {
 }
 
 function StatusBadge({ status, label }) {
-  const cfg = { idle:{color:"rgba(255,255,255,0.2)",text:"待機中"}, fetching:{color:"#ffb347",text:"取得中..."}, summarizing:{color:"#c084fc",text:"AI要約中..."}, saving:{color:"#4ade80",text:"保存中..."}, done:{color:"#4dd2ff",text:"完了"}, error:{color:"#ff6b6b",text:"エラー"} }[status] || {color:"rgba(255,255,255,0.2)",text:status};
+  const cfg = {
+    idle:        { color:"rgba(255,255,255,0.2)", text:"待機中" },
+    fetching:    { color:"#ffb347", text:"取得中..." },
+    summarizing: { color:"#c084fc", text:"AI要約中..." },
+    done:        { color:"#4dd2ff", text:"完了" },
+    error:       { color:"#ff6b6b", text:"エラー" },
+  }[status] || { color:"rgba(255,255,255,0.2)", text:status };
   return <span style={{ fontSize:10, color:cfg.color, fontFamily:"sans-serif" }}>{label}: {cfg.text}</span>;
 }
 
@@ -127,22 +133,44 @@ export default function Home() {
   const [selectedItem, setSelectedItem] = useState(null);
   const [calendarOpen, setCalendarOpen] = useState(true);
   const [items, setItems] = useState([]);
-  const [fetchStatus, setFetchStatus] = useState({ lodestone:"idle", yahoo:"idle", ai:"idle" });
+  const [fetchStatus, setFetchStatus] = useState({ lodestone:"idle", yahoo:"idle", yanflash:"idle", ai:"idle" });
   const [lastUpdate, setLastUpdate] = useState(null);
   const [errorDetail, setErrorDetail] = useState("");
   const [dataDates, setDataDates] = useState([]);
   const [loadingHistory, setLoadingHistory] = useState(false);
+  const [cacheLoaded, setCacheLoaded] = useState(false);
 
   const isToday = isSameDay(selectedDate, today);
   const filtered = activeCategory==="all" ? items : items.filter(i=>i.category===activeCategory);
   const dateLabel = isToday ? "今日" : `${selectedDate.getMonth()+1}月${selectedDate.getDate()}日`;
-  const isFetching = Object.values(fetchStatus).some(s=>s==="fetching"||s==="summarizing"||s==="saving");
+  const isFetching = Object.values(fetchStatus).some(s=>s==="fetching"||s==="summarizing");
 
-  // 日付変更時に過去データを読み込む
+  // 起動時に今日のキャッシュを自動ロード
+  useEffect(() => {
+    const loadTodayCache = async () => {
+      setLoadingHistory(true);
+      try {
+        const key = toDateKey(today);
+        const res = await fetch(`/api/history?date=${key}`);
+        const data = await res.json();
+        if (data.exists && data.items?.length > 0) {
+          setItems(data.items.map((s,i) => ({ id:`cache_${i}`, ...s })));
+          setDataDates([key]);
+          setLastUpdate(new Date());
+          setCacheLoaded(true);
+        }
+      } catch {}
+      setLoadingHistory(false);
+    };
+    loadTodayCache();
+  }, []);
+
+  // 日付選択時に過去データを読み込む
   const handleDateSelect = async (date) => {
     setSelectedDate(date);
     setActiveCategory("all");
-    if (isSameDay(date, today)) return; // 今日はそのまま
+    setErrorDetail("");
+    if (isSameDay(date, today) && items.length > 0) return; // 今日のデータあればそのまま
 
     setLoadingHistory(true);
     setItems([]);
@@ -150,7 +178,7 @@ export default function Home() {
       const key = toDateKey(date);
       const res = await fetch(`/api/history?date=${key}`);
       const data = await res.json();
-      if (data.items && data.items.length > 0) {
+      if (data.items?.length > 0) {
         setItems(data.items.map((s,i) => ({ id:`hist_${i}`, ...s })));
       }
     } catch {}
@@ -161,59 +189,65 @@ export default function Home() {
     if (!isToday) return;
     setItems([]);
     setErrorDetail("");
-    let lodestoneItems = [], tweets = [];
+    setCacheLoaded(false);
 
-    setFetchStatus({ lodestone:"fetching", yahoo:"idle", ai:"idle" });
+    let lodestoneItems=[], tweets=[], yanflashItems=[];
+
+    // 並列で3ソース取得
+    setFetchStatus({ lodestone:"fetching", yahoo:"fetching", yanflash:"fetching", ai:"idle" });
+
+    const [loRes, yrRes, yfRes] = await Promise.allSettled([
+      fetch("/api/lodestone").then(r=>r.json()),
+      fetch("/api/yahoo-rt").then(r=>r.json()),
+      fetch("/api/yanflash").then(r=>r.json()),
+    ]);
+
+    if (loRes.status==="fulfilled") lodestoneItems = loRes.value.items || [];
+    if (yrRes.status==="fulfilled") tweets = yrRes.value.tweets || [];
+    if (yfRes.status==="fulfilled") yanflashItems = yfRes.value.items || [];
+
+    setFetchStatus({
+      lodestone: lodestoneItems.length>0 ? "done" : "error",
+      yahoo:     tweets.length>0 ? "done" : "error",
+      yanflash:  yanflashItems.length>0 ? "done" : "error",
+      ai: "summarizing",
+    });
+
     try {
-      const res = await fetch("/api/lodestone");
+      const res = await fetch("/api/summarize", {
+        method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({ lodestone_items:lodestoneItems, tweets, yanflash_items:yanflashItems }),
+      });
       const data = await res.json();
-      if (data.items) lodestoneItems = data.items;
-      setFetchStatus(s=>({...s, lodestone:lodestoneItems.length>0?"done":"error"}));
-    } catch { setFetchStatus(s=>({...s, lodestone:"error"})); }
-
-    setFetchStatus(s=>({...s, yahoo:"fetching"}));
-    try {
-      const res = await fetch("/api/yahoo-rt");
-      const data = await res.json();
-      if (data.tweets) tweets = data.tweets;
-      setFetchStatus(s=>({...s, yahoo:tweets.length>0?"done":"error"}));
-    } catch { setFetchStatus(s=>({...s, yahoo:"error"})); }
-
-    if (lodestoneItems.length>0||tweets.length>0) {
-      setFetchStatus(s=>({...s, ai:"summarizing"}));
-      try {
-        const res = await fetch("/api/summarize", {
-          method:"POST",
-          headers:{"Content-Type":"application/json"},
-          body: JSON.stringify({ lodestone_items:lodestoneItems, tweets }),
-        });
-        const data = await res.json();
-        if (data.error) {
-          setErrorDetail(data.error);
-          setFetchStatus(s=>({...s, ai:"error"}));
-        } else if (data.summaries?.length>0) {
-          const newItems = data.summaries.map((s,i)=>({ id:`live_${Date.now()}_${i}`, ...s }));
-          setItems(newItems);
-          const todayKey = toDateKey(today);
-          setDataDates(d => d.includes(todayKey) ? d : [...d, todayKey]);
-          setFetchStatus(s=>({...s, ai:"done"}));
-        } else {
-          setFetchStatus(s=>({...s, ai:"error"}));
-        }
-      } catch(e) {
-        setErrorDetail(e.message);
+      if (data.error) {
+        setErrorDetail(data.error);
+        setFetchStatus(s=>({...s, ai:"error"}));
+      } else if (data.summaries?.length > 0) {
+        const newItems = data.summaries.map((s,i)=>({ id:`live_${Date.now()}_${i}`, ...s }));
+        setItems(newItems);
+        const todayKey = toDateKey(today);
+        setDataDates(d => d.includes(todayKey) ? d : [...d, todayKey]);
+        setFetchStatus(s=>({...s, ai:"done"}));
+      } else {
         setFetchStatus(s=>({...s, ai:"error"}));
       }
+    } catch(e) {
+      setErrorDetail(e.message);
+      setFetchStatus(s=>({...s, ai:"error"}));
     }
     setLastUpdate(new Date());
   };
 
-  const updateStr = lastUpdate ? `${lastUpdate.getMonth()+1}月${lastUpdate.getDate()}日 ${lastUpdate.getHours()}:${String(lastUpdate.getMinutes()).padStart(2,"0")}` : "未取得";
+  const updateStr = lastUpdate
+    ? `${lastUpdate.getMonth()+1}月${lastUpdate.getDate()}日 ${lastUpdate.getHours()}:${String(lastUpdate.getMinutes()).padStart(2,"0")}`
+    : "未取得";
 
   return (
     <div style={{ minHeight:"100vh", background:"linear-gradient(180deg, #0a0806 0%, #0e0c09 40%, #0a0806 100%)", color:"#fff", fontFamily:"sans-serif", maxWidth:480, margin:"0 auto", position:"relative" }}>
       <div style={{ position:"fixed", top:0, left:"50%", transform:"translateX(-50%)", width:480, height:300, background:"radial-gradient(ellipse at 50% 0%, rgba(180,140,80,0.08) 0%, transparent 70%)", pointerEvents:"none", zIndex:0 }}/>
       <div style={{ position:"relative", zIndex:1 }}>
+
         {/* ヘッダー */}
         <div style={{ padding:"20px 20px 16px" }}>
           <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start" }}>
@@ -223,21 +257,29 @@ export default function Home() {
             </div>
             {isToday && (
               <button onClick={handleFetch} disabled={isFetching} style={{ background:isFetching?"rgba(180,140,80,0.05)":"rgba(180,140,80,0.1)", border:"1px solid rgba(180,140,80,0.3)", borderRadius:12, padding:"10px 14px", color:isFetching?"rgba(180,140,80,0.4)":"rgba(180,140,80,0.9)", cursor:isFetching?"not-allowed":"pointer", fontSize:12, fontFamily:"'Cinzel', serif", letterSpacing:"0.05em", display:"flex", alignItems:"center", gap:6 }}>
-                {isFetching?"取得中...":"⟳ 最新取得"}
+                {isFetching ? "取得中..." : "⟳ 最新取得"}
               </button>
             )}
           </div>
-          <div style={{ marginTop:8, fontSize:11, color:"rgba(255,255,255,0.25)", fontFamily:"sans-serif" }}>最終更新: {updateStr}</div>
 
-          {fetchStatus.lodestone!=="idle" && (
+          <div style={{ marginTop:8, fontSize:11, color:"rgba(255,255,255,0.25)", fontFamily:"sans-serif" }}>
+            最終更新: {updateStr}
+            {cacheLoaded && <span style={{ marginLeft:8, color:"rgba(180,140,80,0.5)" }}>（キャッシュ）</span>}
+          </div>
+
+          {/* 取得ステータス */}
+          {fetchStatus.lodestone !== "idle" && (
             <div style={{ marginTop:10, padding:"10px 14px", background:"rgba(255,255,255,0.02)", border:"1px solid rgba(255,255,255,0.06)", borderRadius:12, display:"flex", flexDirection:"column", gap:4 }}>
               <StatusBadge status={fetchStatus.lodestone} label="📡 Lodestone"/>
+              <StatusBadge status={fetchStatus.yanflash} label="🐱 ヤーン速報"/>
               <StatusBadge status={fetchStatus.yahoo} label="🐦 X話題"/>
               <StatusBadge status={fetchStatus.ai} label="🤖 AI要約"/>
             </div>
           )}
+
           {errorDetail && <div style={{ marginTop:8, padding:"8px 12px", background:"rgba(255,77,77,0.08)", border:"1px solid rgba(255,77,77,0.2)", borderRadius:10, fontSize:11, color:"rgba(255,150,150,0.7)", fontFamily:"sans-serif" }}>{errorDetail}</div>}
-          {items.filter(i=>i.urgency==="high").length>0 && isToday && (
+
+          {items.filter(i=>i.urgency==="high").length > 0 && isToday && (
             <div style={{ marginTop:12, padding:"10px 14px", background:"linear-gradient(135deg, rgba(255,77,77,0.08), rgba(255,77,77,0.03))", border:"1px solid rgba(255,77,77,0.2)", borderRadius:12, display:"flex", alignItems:"center", gap:10 }}>
               <span>🔴</span>
               <span style={{ fontSize:12, color:"rgba(255,150,150,0.9)", fontFamily:"sans-serif" }}>要チェックの情報が{items.filter(i=>i.urgency==="high").length}件あります</span>
@@ -245,8 +287,10 @@ export default function Home() {
           )}
         </div>
 
+        {/* カレンダー */}
         <Calendar selectedDate={selectedDate} onSelect={handleDateSelect} calendarOpen={calendarOpen} onToggle={()=>setCalendarOpen(o=>!o)} dataDates={dataDates}/>
 
+        {/* 日付ラベル＋カテゴリ */}
         <div style={{ padding:"14px 20px 0" }}>
           <div style={{ fontSize:13, color:"rgba(180,140,80,0.7)", fontFamily:"'Noto Serif JP', serif", marginBottom:10 }}>
             {dateLabel}のニュース
@@ -261,15 +305,16 @@ export default function Home() {
           </div>
         </div>
 
+        {/* カードリスト */}
         <div style={{ padding:"14px 16px 40px", display:"flex", flexDirection:"column", gap:12 }}>
-          {isFetching||loadingHistory ? (
+          {isFetching || loadingHistory ? (
             <div style={{ textAlign:"center", padding:"60px 0", color:"rgba(180,140,80,0.5)" }}>
               <div style={{ fontSize:28, marginBottom:12, animation:"pulse 1.5s ease infinite" }}>⚔️</div>
               <div style={{ fontSize:13, fontFamily:"'Cinzel', serif", letterSpacing:"0.1em" }}>
-                {loadingHistory?"過去のデータを読み込み中...":"エオルゼアの情報を収集中..."}
+                {loadingHistory ? "データを読み込み中..." : "エオルゼアの情報を収集中..."}
               </div>
             </div>
-          ) : filtered.length===0 ? (
+          ) : filtered.length === 0 ? (
             <div style={{ textAlign:"center", padding:"60px 0", color:"rgba(255,255,255,0.2)" }}>
               <div style={{ fontSize:24, marginBottom:8 }}>📭</div>
               <div style={{ fontSize:13 }}>
@@ -279,6 +324,7 @@ export default function Home() {
           ) : filtered.map(item=><NewsCard key={item.id} item={item} onClick={setSelectedItem}/>)}
         </div>
       </div>
+
       <DetailModal item={selectedItem} onClose={()=>setSelectedItem(null)}/>
       <style>{`
         @keyframes pulse{0%,100%{opacity:0.5}50%{opacity:1}}
