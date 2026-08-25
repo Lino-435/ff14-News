@@ -1,21 +1,20 @@
-// Reddit RSS（認証不要）。429対策で逐次取得＋ディレイ。
-const FEEDS = [
-  // top/day = その日最も評価された投稿（雑談より情報性が高い傾向）
-  { url: "https://www.reddit.com/r/ffxiv/top/.rss?t=day&limit=20", label: "top-day" },
-  // 検索フィード：パッチ・アップデート関連に絞る
-  { url: "https://www.reddit.com/r/ffxiv/search/.rss?q=flair%3ANews+OR+patch+OR+update&restrict_sr=1&sort=new&t=week&limit=15", label: "news-search" },
-];
+// Reddit RSS（認証不要）
+// r/ffxivdiscussion = 仕様・バランス・変更点を議論する場（r/ffxivより情報密度が高い）
+// 429回避のため1リクエストにつき1フィードのみ取得
+const FEED = "https://www.reddit.com/r/ffxivdiscussion/top/.rss?t=week&limit=25";
 
-// 除外したい定型スレッド（情報価値が低い）
+// 予備フィード（メインが429の時のみ使用）
+const FALLBACK = "https://www.reddit.com/r/ffxivdiscussion/.rss?limit=25";
+
 const EXCLUDE_PATTERNS = [
   /daily questions/i,
   /faq megathread/i,
   /weekly thread/i,
   /mentor monday/i,
-  /free talk friday/i,
+  /free talk/i,
   /screenshot sunday/i,
-  /\[art by me\]/i,
   /art by me/i,
+  /^\[?fluff\]?/i,
 ];
 
 function decodeEntities(s) {
@@ -25,24 +24,11 @@ function decodeEntities(s) {
     .replace(/&#32;/g, " ").replace(/&amp;/g, "&");
 }
 
-function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
-
-async function fetchFeed(feed) {
-  const res = await fetch(feed.url, {
-    headers: {
-      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-      "Accept": "application/atom+xml, application/rss+xml, application/xml, text/xml, */*",
-      "Accept-Language": "en-US,en;q=0.9",
-    },
-  });
-  if (!res.ok) return { items: [], status: res.status, label: feed.label };
-
-  const xml = await res.text();
+function parseFeed(xml) {
   const items = [];
   const entryRegex = /<entry>([\s\S]*?)<\/entry>/g;
   let m;
-
-  while ((m = entryRegex.exec(xml)) !== null && items.length < 20) {
+  while ((m = entryRegex.exec(xml)) !== null && items.length < 25) {
     const block = m[1];
     const rawTitle = block.match(/<title[^>]*>([\s\S]*?)<\/title>/)?.[1] || "";
     const rawContent = block.match(/<content[^>]*>([\s\S]*?)<\/content>/)?.[1] || "";
@@ -50,44 +36,62 @@ async function fetchFeed(feed) {
     const updated = block.match(/<updated>([\s\S]*?)<\/updated>/)?.[1] || "";
 
     const title = decodeEntities(rawTitle).trim();
-    if (title.length < 4) continue;
+    if (title.length < 6) continue;
     if (EXCLUDE_PATTERNS.some(p => p.test(title))) continue;
 
-    let content = decodeEntities(rawContent)
+    const content = decodeEntities(rawContent)
       .replace(/<[^>]+>/g, " ")
       .replace(/submitted by\s*\/u\/\S+/gi, "")
       .replace(/\[link\]|\[comments\]/gi, "")
+      .replace(/https?:\/\/\S+/g, "")
       .replace(/\s+/g, " ")
       .trim()
-      .slice(0, 250);
+      .slice(0, 300);
 
     items.push({ title, description: content, link, pubDate: updated });
   }
-  return { items, status: res.status, label: feed.label };
+  return items;
+}
+
+async function tryFetch(url) {
+  const res = await fetch(url, {
+    headers: {
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+      "Accept": "application/atom+xml, application/rss+xml, application/xml, text/xml, */*",
+      "Accept-Language": "en-US,en;q=0.9",
+      "Cache-Control": "no-cache",
+    },
+  });
+  if (!res.ok) return { items: [], status: res.status };
+  const xml = await res.text();
+  return { items: parseFeed(xml), status: res.status };
 }
 
 export async function GET() {
   try {
-    const all = [];
-    const seen = new Set();
-    const statuses = [];
+    // メインフィードを試す
+    let result = await tryFetch(FEED);
 
-    // 429回避のため逐次取得（間に1.2秒待機）
-    for (let i = 0; i < FEEDS.length; i++) {
-      if (i > 0) await sleep(1200);
-      try {
-        const r = await fetchFeed(FEEDS[i]);
-        statuses.push({ label: r.label, status: r.status, got: r.items.length });
-        for (const item of r.items) {
-          const key = item.title.toLowerCase();
-          if (!seen.has(key)) { seen.add(key); all.push(item); }
-        }
-      } catch (e) {
-        statuses.push({ label: FEEDS[i].label, error: e.message });
+    // 429ならフォールバックを試す
+    if (result.status === 429 || result.items.length === 0) {
+      await new Promise(r => setTimeout(r, 1500));
+      const fb = await tryFetch(FALLBACK);
+      if (fb.items.length > 0) {
+        return Response.json({
+          items: fb.items,
+          count: fb.items.length,
+          source: "fallback",
+          statuses: [result.status, fb.status],
+        });
       }
     }
 
-    return Response.json({ items: all.slice(0, 20), count: all.length, statuses });
+    return Response.json({
+      items: result.items,
+      count: result.items.length,
+      source: "main",
+      statuses: [result.status],
+    });
   } catch (e) {
     return Response.json({ items: [], error: e.message });
   }
