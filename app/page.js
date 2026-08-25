@@ -133,7 +133,7 @@ export default function Home() {
   const [selectedItem, setSelectedItem] = useState(null);
   const [calendarOpen, setCalendarOpen] = useState(true);
   const [items, setItems] = useState([]);
-  const [fetchStatus, setFetchStatus] = useState({ lodestone:"idle", yahoo:"idle", yanflash:"idle", ai:"idle" });
+  const [fetchStatus, setFetchStatus] = useState({ lodestone:"idle", yahoo:"idle", yanflash:"idle", reddit:"idle", ai:"idle" });
   const [lastUpdate, setLastUpdate] = useState(null);
   const [errorDetail, setErrorDetail] = useState("");
   const [dataDates, setDataDates] = useState([]);
@@ -191,25 +191,28 @@ export default function Home() {
     setErrorDetail("");
     setCacheLoaded(false);
 
-    let lodestoneItems=[], tweets=[], yanflashItems=[];
+    let lodestoneItems=[], tweets=[], yanflashItems=[], redditItems=[];
 
     // 並列で3ソース取得
-    setFetchStatus({ lodestone:"fetching", yahoo:"fetching", yanflash:"fetching", ai:"idle" });
+    setFetchStatus({ lodestone:"fetching", yahoo:"fetching", yanflash:"fetching", reddit:"fetching", ai:"idle" });
 
-    const [loRes, yrRes, yfRes] = await Promise.allSettled([
+    const [loRes, yrRes, yfRes, rdRes] = await Promise.allSettled([
       fetch("/api/lodestone").then(r=>r.json()),
       fetch("/api/yahoo-rt").then(r=>r.json()),
       fetch("/api/yanflash").then(r=>r.json()),
+      fetch("/api/reddit").then(r=>r.json()),
     ]);
 
     if (loRes.status==="fulfilled") lodestoneItems = loRes.value.items || [];
     if (yrRes.status==="fulfilled") tweets = yrRes.value.tweets || [];
     if (yfRes.status==="fulfilled") yanflashItems = yfRes.value.items || [];
+    if (rdRes.status==="fulfilled") redditItems = rdRes.value.items || [];
 
     setFetchStatus({
       lodestone: lodestoneItems.length>0 ? "done" : "error",
       yahoo:     tweets.length>0 ? "done" : "error",
       yanflash:  yanflashItems.length>0 ? "done" : "error",
+      reddit:    redditItems.length>0 ? "done" : "error",
       ai: "summarizing",
     });
 
@@ -217,7 +220,7 @@ export default function Home() {
       const res = await fetch("/api/summarize", {
         method:"POST",
         headers:{"Content-Type":"application/json"},
-        body: JSON.stringify({ lodestone_items:lodestoneItems, tweets, yanflash_items:yanflashItems }),
+        body: JSON.stringify({ lodestone_items:lodestoneItems, tweets, yanflash_items:yanflashItems, reddit_items:redditItems }),
       });
       const data = await res.json();
       if (data.error) {
@@ -272,6 +275,7 @@ export default function Home() {
             <div style={{ marginTop:10, padding:"10px 14px", background:"rgba(255,255,255,0.02)", border:"1px solid rgba(255,255,255,0.06)", borderRadius:12, display:"flex", flexDirection:"column", gap:4 }}>
               <StatusBadge status={fetchStatus.lodestone} label="📡 Lodestone"/>
               <StatusBadge status={fetchStatus.yanflash} label="🐱 ヤーン速報"/>
+              <StatusBadge status={fetchStatus.reddit} label="👽 r/ffxiv"/>
               <StatusBadge status={fetchStatus.yahoo} label="🐦 X話題"/>
               <StatusBadge status={fetchStatus.ai} label="🤖 AI要約"/>
             </div>
