@@ -139,48 +139,66 @@ export default function Home() {
   const [dataDates, setDataDates] = useState([]);
   const [loadingHistory, setLoadingHistory] = useState(false);
   const [cacheLoaded, setCacheLoaded] = useState(false);
+  const [dayCache, setDayCache] = useState({}); // メモリキャッシュ
+  const [addedCount, setAddedCount] = useState(null);
 
   const isToday = isSameDay(selectedDate, today);
   const filtered = activeCategory==="all" ? items : items.filter(i=>i.category===activeCategory);
   const dateLabel = isToday ? "今日" : `${selectedDate.getMonth()+1}月${selectedDate.getDate()}日`;
   const isFetching = Object.values(fetchStatus).some(s=>s==="fetching"||s==="summarizing");
 
-  // 起動時に今日のキャッシュを自動ロード
+  // 起動時: データがある日付一覧 + 今日のデータをロード
   useEffect(() => {
-    const loadTodayCache = async () => {
+    const init = async () => {
       setLoadingHistory(true);
+
+      // データがある日付一覧を取得（カレンダーのドット表示用）
+      try {
+        const listRes = await fetch("/api/history/list");
+        const listData = await listRes.json();
+        if (listData.dates?.length > 0) setDataDates(listData.dates);
+      } catch {}
+
+      // 今日のデータをロード
       try {
         const key = toDateKey(today);
         const res = await fetch(`/api/history?date=${key}`);
         const data = await res.json();
-        if (data.exists && data.items?.length > 0) {
-          setItems(data.items.map((s,i) => ({ id:`cache_${i}`, ...s })));
-          setDataDates([key]);
+        if (data.items?.length > 0) {
+          const loaded = data.items.map((s,i) => ({ id:`cache_${key}_${i}`, ...s }));
+          setItems(loaded);
+          setDayCache(c => ({ ...c, [key]: loaded }));
           setLastUpdate(new Date());
           setCacheLoaded(true);
         }
       } catch {}
+
       setLoadingHistory(false);
     };
-    loadTodayCache();
+    init();
   }, []);
 
   // 日付選択時に過去データを読み込む
   const handleDateSelect = async (date) => {
+    const key = toDateKey(date);
     setSelectedDate(date);
     setActiveCategory("all");
     setErrorDetail("");
-    if (isSameDay(date, today) && items.length > 0) return; // 今日のデータあればそのまま
+
+    // メモリキャッシュにあれば即表示（通信もAI消費もゼロ）
+    if (dayCache[key]) {
+      setItems(dayCache[key]);
+      return;
+    }
 
     setLoadingHistory(true);
     setItems([]);
     try {
-      const key = toDateKey(date);
       const res = await fetch(`/api/history?date=${key}`);
       const data = await res.json();
-      if (data.items?.length > 0) {
-        setItems(data.items.map((s,i) => ({ id:`hist_${i}`, ...s })));
-      }
+      const loaded = (data.items || []).map((s,i) => ({ id:`hist_${key}_${i}`, ...s }));
+      setItems(loaded);
+      setDayCache(c => ({ ...c, [key]: loaded })); // キャッシュに保存
     } catch {}
     setLoadingHistory(false);
   };
@@ -229,8 +247,10 @@ export default function Home() {
       } else if (data.summaries?.length > 0) {
         const newItems = data.summaries.map((s,i)=>({ id:`live_${Date.now()}_${i}`, ...s }));
         setItems(newItems);
-        const todayKey = toDateKey(today);
-        setDataDates(d => d.includes(todayKey) ? d : [...d, todayKey]);
+        const tk = toDateKey(today);
+        setDayCache(c => ({ ...c, [tk]: newItems }));
+        setDataDates(d => d.includes(tk) ? d : [...d, tk]);
+        if (typeof data.added === "number") setAddedCount(data.added);
         setFetchStatus(s=>({...s, ai:"done"}));
       } else {
         setFetchStatus(s=>({...s, ai:"error"}));
@@ -260,14 +280,15 @@ export default function Home() {
             </div>
             {isToday && (
               <button onClick={handleFetch} disabled={isFetching} style={{ background:isFetching?"rgba(180,140,80,0.05)":"rgba(180,140,80,0.1)", border:"1px solid rgba(180,140,80,0.3)", borderRadius:12, padding:"10px 14px", color:isFetching?"rgba(180,140,80,0.4)":"rgba(180,140,80,0.9)", cursor:isFetching?"not-allowed":"pointer", fontSize:12, fontFamily:"'Cinzel', serif", letterSpacing:"0.05em", display:"flex", alignItems:"center", gap:6 }}>
-                {isFetching ? "取得中..." : "⟳ 最新取得"}
+                {isFetching ? "取得中..." : cacheLoaded ? "⟳ 追加取得" : "⟳ 最新取得"}
               </button>
             )}
           </div>
 
           <div style={{ marginTop:8, fontSize:11, color:"rgba(255,255,255,0.25)", fontFamily:"sans-serif" }}>
             最終更新: {updateStr}
-            {cacheLoaded && <span style={{ marginLeft:8, color:"rgba(180,140,80,0.5)" }}>（キャッシュ）</span>}
+            {cacheLoaded && <span style={{ marginLeft:8, color:"rgba(180,140,80,0.5)" }}>（保存済み）</span>}
+            {addedCount !== null && <span style={{ marginLeft:8, color:addedCount>0?"#4ade80":"rgba(255,255,255,0.25)" }}>{addedCount>0?`+${addedCount}件追加`:"新着なし"}</span>}
           </div>
 
           {/* 取得ステータス */}
